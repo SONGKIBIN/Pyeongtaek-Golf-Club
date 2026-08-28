@@ -379,6 +379,7 @@ let installDismissed = false;
 let pendingPersistTimer = null;
 let pendingPersistState = null;
 let pendingPersistOpts = null;
+let pendingPinLogin = null; // memberId awaiting admin PIN entry (not yet logged in)
 
 const session = {
   memberId: null,
@@ -644,8 +645,24 @@ function attemptLogin(name, phone){
   const found = appState.members.find(m => m.name.trim()===n && onlyDigits(m.phone)===p);
   if(!found) return { ok:false, msg:"이름 또는 전화번호가 일치하지 않아요. 총무님께 등록된 정보를 확인해주세요." };
   if(found.active===false) return { ok:false, msg:"비활성화된 회원입니다. 총무님께 문의해주세요." };
+  if(found.role==="admin" && appState.club && appState.club.adminPin){
+    pendingPinLogin = found.id;
+    return { ok:false, needPin:true };
+  }
   session.memberId = found.id;
   session.tab = "home";
+  saveSession();
+  return { ok:true };
+}
+function attemptPinLogin(pin){
+  const found = pendingPinLogin && appState.members.find(m=>m.id===pendingPinLogin);
+  if(!found) return { ok:false, msg:"다시 이름/전화번호부터 입력해주세요." };
+  if(String(pin||"") !== String(appState.club.adminPin||"")){
+    return { ok:false, msg:"비밀번호가 일치하지 않아요." };
+  }
+  session.memberId = found.id;
+  session.tab = "home";
+  pendingPinLogin = null;
   saveSession();
   return { ok:true };
 }
@@ -793,6 +810,26 @@ function render(){
 }
 
 function renderLogin(){
+  if(pendingPinLogin){
+    const target = appState.members.find(m=>m.id===pendingPinLogin);
+    return `
+    <div class="login-screen">
+      <div class="login-card">
+        <div class="login-crest">평골회<span class="flagmark">⛳</span></div>
+        <h1>평골회</h1>
+        <p class="sub">관리자 확인</p>
+        <form data-form="login-pin">
+          <div class="field">
+            <label>${target?esc(target.name):"관리자"}님, 관리자 비밀번호를 입력해주세요</label>
+            <input type="password" name="pin" placeholder="비밀번호" autocomplete="current-password" required autofocus>
+          </div>
+          <button class="btn btn-primary btn-block" type="submit">확인</button>
+          <button class="btn btn-ghost btn-block" type="button" data-action="cancel-pin-login" style="margin-top:8px;">취소하고 처음으로</button>
+          <div id="login-error"></div>
+        </form>
+      </div>
+    </div>`;
+  }
   return `
   <div class="login-screen">
     <div class="login-card">
@@ -1297,6 +1334,15 @@ function renderDues(){
       </form>
       <p class="helptext" style="margin:8px 0 0;">여기서 정한 금액을 기준으로 회원별 완납·미납이 계산돼요. 찬조금은 별도 집계되며 완납 여부에는 포함되지 않아요.</p>
     </div>
+    <div class="section-title" style="margin-top:18px;"><h2 style="font-size:14.5px;">관리자 비밀번호</h2></div>
+    <div class="card" style="margin-bottom:14px;">
+      <form data-form="admin-pin-settings" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:0;">
+        <div class="field" style="margin:0;"><label>관리자 로그인 비밀번호</label><input type="password" name="adminPin" placeholder="${appState.club && appState.club.adminPin ? '설정됨 · 새 값 입력 시 변경' : '설정 안 됨'}" autocomplete="new-password" style="width:200px;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius-s);"></div>
+        <button class="btn btn-ghost btn-sm" type="submit">저장</button>
+        ${appState.club && appState.club.adminPin ? `<button class="btn btn-danger btn-sm" type="button" data-action="clear-admin-pin">비밀번호 삭제</button>` : ""}
+      </form>
+      <p class="helptext" style="margin:8px 0 0;">설정해두면, 관리자(admin) 권한 회원 이름+전화번호로 로그인할 때 이 비밀번호도 추가로 입력해야 해요. 회원 화면에는 절대 노출되지 않아요. (다만 이 앱은 클라우드 서버 없이 코드 안에 데이터를 담는 구조라, 완벽한 보안은 아니라는 점은 참고해주세요.)</p>
+    </div>
     <div class="section-title" style="margin-top:18px;"><h2 style="font-size:14.5px;">데이터 백업</h2></div>
     <div class="card" style="margin-bottom:14px;">
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -1660,6 +1706,19 @@ function onSubmit(e){
   if(form.matches('[data-form="login"]')){
     const res = attemptLogin(fd.get("name"), fd.get("phone"));
     if(!res.ok){
+      if(res.needPin){ render(); return; }
+      const box = form.querySelector("#login-error");
+      if(box) box.innerHTML = `<div class="error-text">${esc(res.msg)}</div>`;
+      return;
+    }
+    render();
+    setTimeout(checkNewNotice, 200);
+    return;
+  }
+
+  if(form.matches('[data-form="login-pin"]')){
+    const res = attemptPinLogin(fd.get("pin"));
+    if(!res.ok){
       const box = form.querySelector("#login-error");
       if(box) box.innerHTML = `<div class="error-text">${esc(res.msg)}</div>`;
       return;
@@ -1780,6 +1839,16 @@ function onSubmit(e){
     s.club = s.club || {};
     s.club.annualDues = Math.max(0, Number(fd.get("annualDues"))||0);
     persist(s, {toastMsg:"연회비 설정을 저장했어요."});
+    return;
+  }
+
+  if(form.matches('[data-form="admin-pin-settings"]')){
+    const val = String(fd.get("adminPin")||"");
+    if(!val){ toast("변경할 비밀번호를 입력해주세요.","warn"); return; }
+    const s = cloneState();
+    s.club = s.club || {};
+    s.club.adminPin = val;
+    persist(s, {toastMsg:"관리자 비밀번호를 저장했어요."});
     return;
   }
 
@@ -2073,6 +2142,15 @@ function onClick(e){
   if(action==="export-ledger"){ exportLedgerCSV(); return; }
   if(action==="export-members"){ exportMembersCSV(); return; }
   if(action==="export-backup"){ exportFullBackupJSON(); return; }
+  if(action==="cancel-pin-login"){ pendingPinLogin = null; render(); return; }
+  if(action==="clear-admin-pin"){
+    if(!confirm("관리자 비밀번호를 삭제할까요? 이후 관리자도 이름+전화번호만으로 로그인할 수 있게 됩니다.")) return;
+    const s = cloneState();
+    s.club = s.club || {};
+    s.club.adminPin = "";
+    persist(s, {toastMsg:"관리자 비밀번호를 삭제했어요."});
+    return;
+  }
   if(action==="copy-notice"){
     const elId = btn.dataset.scope==="month" ? "month-notice-text" : "year-notice-text";
     const el = document.getElementById(elId);
